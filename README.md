@@ -3,8 +3,11 @@ A web-based application for visualizing hierarchical data using Flask, GoJS, and
 
 Features:
 >Expandable and collapsible tree structure
+
 >Interactive UI using GoJS
+
 >Data processing from Excel
+
 >REST API for fetching hierarchy
 
 Installation:
