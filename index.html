@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Organizational Chart</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gojs/2.3.16/go.js"></script>
+    <style>
+        #myDiagramDiv {
+            width: 100%;
+            height: 600px;
+            border: 1px solid black;
+            background-color: #A7C7E7;
+        }
+    </style>
+</head>
+<body style="background-color: #F8F9FA;">
+    <h1>Organizational Chart</h1>
+    
+    <div id="myDiagramDiv"></div>
+
+   <script>
+    const $ = go.GraphObject.make;
+
+    // Initialize the diagram
+    const diagram = $(go.Diagram, "myDiagramDiv", {
+        layout: $(go.TreeLayout, { angle: 90, layerSpacing: 35 }),
+        "undoManager.isEnabled": true,
+        initialContentAlignment: go.Spot.Center, // Align the diagram to the center initially
+        contentAlignment: go.Spot.Center,
+        initialScale: 1, // Control initial scale to fit the whole diagram
+        maxScale: 2, // Max zoom-in limit
+        minScale: 0.2, // Min zoom-out limit
+    });
+
+    // Node template with child count
+    diagram.nodeTemplate = $(go.Node, "Auto",
+        $(go.Shape, "Rectangle", { fill:" #F8F9FA", strokeWidth: 0 }),
+        $(go.Panel, "Table", { margin: 5 },
+            $(go.TextBlock, { row: 0, font: "bold 12px sans-serif" }, new go.Binding("text", "name")),
+            $(go.TextBlock, { row: 1, font: "10px sans-serif", margin: new go.Margin(5, 0, 0, 0) }, new go.Binding("text", "position")),
+            $(go.TextBlock, 
+                { 
+                    row: 2, 
+                    font: "10px sans-serif", 
+                    alignment: go.Spot.Bottom, 
+                    margin: new go.Margin(5, 0, 0, 0) 
+                }, 
+                new go.Binding("text", "childCount", (c) => c ? `(${c})` : "(0)")
+            )
+        )
+    );
+
+    // Link template
+    diagram.linkTemplate = $(go.Link,
+        $(go.Shape, { strokeWidth: 1.5, stroke: "gray" })
+    );
+
+    // Fetch top-level nodes from Flask API
+    const loadTopLevelNodes = async () => {
+        try {
+            const response = await fetch('/api/get-top-level');
+            const topLevelNodes = await response.json();
+            diagram.model = new go.TreeModel(topLevelNodes);
+        } catch (error) {
+            console.error("Error loading top-level nodes:", error);
+        }
+    };
+
+    // Fetch immediate child nodes dynamically
+    const loadChildren = async (parentNode) => {
+        const parentKey = parentNode.data.key;
+
+        try {
+            const response = await fetch(`/api/get-children/${parentKey}`);
+            const children = await response.json();
+
+            // Add children to the model
+            diagram.model.startTransaction("add children");
+            children.forEach(child => {
+                diagram.model.addNodeData(child);
+            });
+
+            // Mark parent as loaded
+            diagram.model.setDataProperty(parentNode.data, "loaded", true);
+            diagram.model.commitTransaction("add children");
+
+            // After loading the children, focus the diagram on the parent and its new children
+            focusOnNodeAndChildren(parentNode);
+
+        } catch (error) {
+            console.error("Error loading children:", error);
+        }
+    };
+
+    // Remove all descendants dynamically
+    const removeAllDescendants = (parentNode) => {
+        const parentKey = parentNode.data.key;
+
+        diagram.model.startTransaction("remove descendants");
+
+        // Find all descendants of the parent
+        const descendants = [];
+        const findDescendants = (nodeKey) => {
+            diagram.model.nodeDataArray.forEach(node => {
+                if (node.parent === nodeKey) {
+                    descendants.push(node);
+                    findDescendants(node.key); // Recursively find deeper descendants
+                }
+            });
+        };
+        findDescendants(parentKey);
+    
+        // Remove all descendants from the model
+        descendants.forEach(descendant => {
+            diagram.model.removeNodeData(descendant);
+        });
+
+        // Mark parent as unloaded
+        diagram.model.setDataProperty(parentNode.data, "loaded", false);
+        diagram.model.commitTransaction("remove descendants");
+
+        // After removing the descendants, refocus on the parent
+        focusOnNodeAndChildren(parentNode);
+    };
+
+    // Focus on a node and its children, and ensure it is centered on the screen
+    function focusOnNodeAndChildren(parentNode) {
+        // Get the bounding box of the node and its children
+        const parentKey = parentNode.data.key;
+        const childNodes = diagram.nodes.filter(n => n.data && n.data.parent === parentKey).toArray();
+        const nodesToFocus = [parentNode, ...childNodes];
+
+        // Get the bounding box of the focused nodes
+        const boundingBox = getBoundingBox(nodesToFocus);
+
+        // Zoom to fit the selected node and its children
+        diagram.zoomToFit(boundingBox);
+
+        // Center the diagram on the parent node (keeping it in view)
+        const centerPoint = boundingBox.center;
+        diagram.scrollTo(centerPoint); // This will scroll and center the selected node and its children
+
+        // Optionally, set a maximum zoom level
+        const scaleFactor = diagram.scale;
+        if (scaleFactor > diagram.maxScale) {
+            diagram.scale = diagram.maxScale; // Prevent zooming in too much
+        } else if (scaleFactor < diagram.minScale) {
+            diagram.scale = diagram.minScale; // Prevent zooming out too much
+        }
+    }
+
+    // Get the bounding box of all selected nodes
+    function getBoundingBox(nodes) {
+        let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+        nodes.forEach(node => {
+            const bounds = node.actualBounds;
+            left = Math.min(left, bounds.x);
+            top = Math.min(top, bounds.y);
+            right = Math.max(right, bounds.x + bounds.width);
+            bottom = Math.max(bottom, bounds.y + bounds.height);
+        });
+        return new go.Rect(left, top, right - left, bottom - top);
+    }
+
+    // Expand/collapse listener to toggle children visibility and focus
+    diagram.addDiagramListener("ObjectSingleClicked", (event) => {
+        const node = event.subject.part;
+        if (node instanceof go.Node) {
+            if (node.data.loaded) {
+                // If already loaded, remove all descendants
+                removeAllDescendants(node);
+            } else {
+                // If not loaded, fetch and display only direct children
+                loadChildren(node);
+            }
+        }
+    });
+
+    // Load top-level nodes when the page loads
+    loadTopLevelNodes();
+</script>
+</body>
+</html>
